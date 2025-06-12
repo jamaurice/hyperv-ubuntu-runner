@@ -24,7 +24,7 @@ if (Test-Path $vmPath) {
 }
 New-Item -ItemType Directory -Path $vmPath -Force | Out-Null
 
-# STEP 2: Download Ubuntu Server ISO if missing
+# STEP 2: Check and download Ubuntu Server ISO if missing
 if (-not (Test-Path $isoPath)) {
     Write-Host "⬇️ Downloading Ubuntu Server ISO..."
     try {
@@ -35,7 +35,7 @@ if (-not (Test-Path $isoPath)) {
         exit 1
     }
 } else {
-    Write-Host "✅ ISO already exists: $isoPath"
+    Write-Host "✅ ISO already exists at $isoPath, skipping download."
 }
 
 # STEP 3: Create new dynamic VHDX for install
@@ -52,10 +52,35 @@ try {
     exit 1
 }
 
-# STEP 4: Build VM
+# STEP 4: Create virtual switch if it doesn't exist
+if (-not (Get-VMSwitch -Name $switch -ErrorAction SilentlyContinue)) {
+    Write-Host "🕹️ Creating Default Switch..."
+    try {
+        $adapter = Get-NetAdapter | Where-Object { $_.Status -eq "Up" } | Select-Object -First 1
+        if ($adapter) {
+            New-VMSwitch -Name $switch -NetAdapterName $adapter.Name -SwitchType External -ErrorAction Stop | Out-Null
+            Write-Host "✅ Default Switch created as External."
+        } else {
+            New-VMSwitch -Name $switch -SwitchType Internal -ErrorAction Stop | Out-Null
+            Write-Host "✅ Default Switch created as Internal (no active adapter found)."
+        }
+    } catch {
+        try {
+            New-VMSwitch -Name $switch -SwitchType Internal -ErrorAction Stop | Out-Null
+            Write-Host "✅ Default Switch created as Internal (External failed)."
+        } catch {
+            Write-Error "❌ Failed to create Default Switch: $_"
+            exit 1
+        }
+    }
+} else {
+    Write-Host "✅ Default Switch already exists."
+}
+
+# STEP 5: Build VM
 Write-Host "💻 Creating Hyper-V VM..."
 try {
-    New-VM -Name $vmName -MemoryStartupBytes $memory -Generation 2 -NewVHDPath $vhdxPath -Path $vmPath -ErrorAction Stop | Out-Null
+    New-VM -Name $vmName -MemoryStartupBytes $memory -Generation 2 -VHDPath $vhdxPath -Path $vmPath -ErrorAction Stop | Out-Null
     Set-VMProcessor -VMName $vmName -Count $cpuCount -ErrorAction Stop
     Set-VMFirmware -VMName $vmName -EnableSecureBoot On -SecureBootTemplate "MicrosoftUEFICertificateAuthority" -ErrorAction Stop
     Add-VMNetworkAdapter -VMName $vmName -SwitchName $switch -ErrorAction Stop
@@ -66,9 +91,25 @@ try {
     exit 1
 }
 
-# STEP 5: Start Ubuntu installer
+# STEP 6: Check and start VM
 Write-Host "▶️ Starting VM..."
 try {
+    $hvHostService = Get-Service HvHost -ErrorAction Stop
+    $vmmsService = Get-Service vmms -ErrorAction Stop
+    if ($hvHostService.Status -ne "Running") {
+        try {
+            Start-Service HvHost -Verbose -ErrorAction Stop
+            Write-Host "✅ Started HV Host Service."
+        } catch {
+            Write-Error "❌ Failed to start HV Host Service: $_"
+            Write-Host "ℹ️ Ensure hypervisor is enabled with 'bcdedit /set hypervisorlaunchtype auto' and reboot, or check Event Viewer (Hyper-V-HvHost) for details."
+            exit 1
+        }
+    }
+    if ($vmmsService.Status -ne "Running") {
+        Start-Service vmms -ErrorAction Stop
+        Write-Host "✅ Started Hyper-V Virtual Machine Management service."
+    }
     Start-VM -Name $vmName -ErrorAction Stop
     Write-Host "✅ VM '$vmName' started!"
 } catch {
