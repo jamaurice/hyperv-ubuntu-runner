@@ -1,53 +1,81 @@
-\
-# create-ubuntu-vm.ps1
-$vmName = "UbuntuDockerRunner"
-$vmPath = "C:\HyperV\$vmName"
-$vhddPath = "$vmPath\ubuntu.vhdx"
-$ubuntuVhdxUrl = "https://releases.ubuntu.com/22.04/ubuntu-22.04-live-server-amd64.iso"  # ISO fallback if VHDX fails
-$switchName = "Default Switch"
-$memory = 2GB
-$cpuCount = 2
+# CONFIG
+$vmName    = "UbuntuDockerRunner"
+$vmPath    = "C:\HyperV\$vmName"
+$isoPath   = "$vmPath\ubuntu-22.04-live-server-amd64.iso"
+$vhdxPath  = "$vmPath\ubuntu.vhdx"
+$memory    = 2GB
+$cpuCount  = 2
+$switch    = "Default Switch"
+$isoUrl    = "https://releases.ubuntu.com/22.04/ubuntu-22.04.5-live-server-amd64.iso"
 
-Write-Host "🔍 Checking for Hyper-V feature..."
-if (-not (Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V).State -eq "Enabled") {
-    Write-Host "❌ Hyper-V is not installed."
-    Exit 1
+# STEP 0: Ensure Hyper-V is enabled
+if ((Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V).State -ne "Enabled") {
+    Write-Error "❌ Hyper-V isn't enabled. Please enable via Windows Features and reboot."
+    exit 1
 }
 Write-Host "✅ Hyper-V is already installed."
 
+# STEP 1: Clean existing VM
 if (Test-Path $vmPath) {
-    Write-Host "🧼 Deleting VM directory $vmPath..."
+    Write-Host "🧹 Removing existing VM and data..."
+    Stop-VM -Name $vmName -Force -ErrorAction SilentlyContinue
+    Remove-VM -Name $vmName -Force -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force $vmPath
 }
-New-Item -ItemType Directory -Path $vmPath | Out-Null
+New-Item -ItemType Directory -Path $vmPath -Force | Out-Null
 
-Write-Host "`n🌐 Downloading Ubuntu VHDX image (22.04)..."
-try {
-    Invoke-WebRequest -Uri $ubuntuVhdxUrl -OutFile $vhddPath -UseBasicParsing
-    Write-Host "✅ Download complete: $vhddPath"
-} catch {
-    Write-Host "❌ Failed to download VHDX: $($_.Exception.Message)"
-    Exit 1
+# STEP 2: Download Ubuntu Server ISO if missing
+if (-not (Test-Path $isoPath)) {
+    Write-Host "⬇️ Downloading Ubuntu Server ISO..."
+    try {
+        Invoke-WebRequest -Uri $isoUrl -OutFile $isoPath -UseBasicParsing -ErrorAction Stop
+        Write-Host "✅ ISO downloaded: $isoPath"
+    } catch {
+        Write-Error "❌ Failed to download ISO: $_"
+        exit 1
+    }
+} else {
+    Write-Host "✅ ISO already exists: $isoPath"
 }
 
-Write-Host "`n🔍 Validating VHDX..."
+# STEP 3: Create new dynamic VHDX for install
+if (Test-Path $vhdxPath) {
+    Write-Host "🗑️ Removing existing VHDX: $vhdxPath"
+    Remove-Item $vhdxPath -Force
+}
+Write-Host "💾 Creating new dynamic VHDX..."
 try {
-    $vhd = Get-VHD -Path $vhddPath
-    Write-Host "✅ VHDX is valid."
+    New-VHD -Path $vhdxPath -SizeBytes 50GB -Dynamic -ErrorAction Stop | Out-Null
+    Write-Host "✅ VHDX created: $vhdxPath"
 } catch {
-    Write-Host "❌ VHDX is corrupt. Deleting and exiting..."
-    Remove-Item $vhddPath -Force
-    Exit 1
+    Write-Error "❌ Failed to create VHDX: $_"
+    exit 1
 }
 
-Write-Host "`n💻 Creating Hyper-V VM..."
-New-VM -Name $vmName -MemoryStartupBytes $memory -VHDPath $vhddPath -Generation 2 -Path $vmPath
-Set-VMProcessor -VMName $vmName -Count $cpuCount
-Set-VMFirmware -VMName $vmName -EnableSecureBoot On -SecureBootTemplate "MicrosoftUEFICertificateAuthority"
-Add-VMNetworkAdapter -VMName $vmName -SwitchName $switchName
-Start-VM -Name $vmName
+# STEP 4: Build VM
+Write-Host "💻 Creating Hyper-V VM..."
+try {
+    New-VM -Name $vmName -MemoryStartupBytes $memory -Generation 2 -NewVHDPath $vhdxPath -Path $vmPath -ErrorAction Stop | Out-Null
+    Set-VMProcessor -VMName $vmName -Count $cpuCount -ErrorAction Stop
+    Set-VMFirmware -VMName $vmName -EnableSecureBoot On -SecureBootTemplate "MicrosoftUEFICertificateAuthority" -ErrorAction Stop
+    Add-VMNetworkAdapter -VMName $vmName -SwitchName $switch -ErrorAction Stop
+    Add-VMDvdDrive -VMName $vmName -Path $isoPath -ErrorAction Stop
+    Write-Host "✅ VM configured successfully."
+} catch {
+    Write-Error "❌ Failed to configure VM: $_"
+    exit 1
+}
 
-Write-Host "`n✅ VM '$vmName' created and started!"
-Write-Host "⏳ Wait 60 seconds, then run this to find the IP:"
-Write-Host "`n   Get-VMNetworkAdapter -VMName $vmName | Select -ExpandProperty IPAddresses"
-Write-Host "`n🔐 Default Ubuntu login: ubuntu / ubuntu"
+# STEP 5: Start Ubuntu installer
+Write-Host "▶️ Starting VM..."
+try {
+    Start-VM -Name $vmName -ErrorAction Stop
+    Write-Host "✅ VM '$vmName' started!"
+} catch {
+    Write-Error "❌ Failed to start VM: $_"
+    exit 1
+}
+
+Write-Host "`n⚠️ Connect to the installer"
+Write-Host "   Open Hyper‑V Manager → Connect to '$vmName' → install Ubuntu as usual."
+Write-Host "💡 Set username 'ubuntu', auto-login 'ubuntu' for simplicity."
